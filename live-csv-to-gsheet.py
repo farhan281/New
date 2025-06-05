@@ -1,5 +1,6 @@
 import time
 import re
+import csv
 import json
 import requests
 from bs4 import BeautifulSoup
@@ -10,8 +11,13 @@ from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urljoin, urlparse
 from tqdm import tqdm
 
+# ────────────────────────────────────────────────────────────────────
+# 1) अपना Webhook URL यहां पेस्ट करें (जो आपने Apps Script डिप्लॉय करते समय कॉपी किया था)
+# ────────────────────────────────────────────────────────────────────
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycby_MJuufa6fKu7XSoWch4wkU7flXq0gxkzky-7c-ANu4W9gvkE5erNVkD_WrBOzW_OJkw/exec"
+# ────────────────────────────────────────────────────────────────────
 
+# List of company URLs to scrape (आप अपनी लिस्ट यहां एडजस्ट कर सकते हैं)
 urls = [
     "http://www.allaccesstraining.co.uk/contact.php",
     "http://www.allbyn.com/contact",
@@ -34,7 +40,18 @@ SOCIAL_DOMAINS = {
     "YouTube": "youtube.com"
 }
 
-PHONE_REGEX = re.compile(r"""(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)\d{3,4}[-.\s]?\d{3,4}""", re.VERBOSE)
+PHONE_REGEX = re.compile(
+    r"""(?:\+?\d{1,3}[-.\s]?)?  # optional country code
+        (?:\(?\d{2,4}\)?[-.\s]?) # optional area code
+        \d{3,4}[-.\s]?\d{3,4}    # main number
+    """, re.VERBOSE
+)
+
+# ────────────────────────────────────────────────────────────────────
+# Live-Update के लिए फ़िक्स्ड मैक्सिमम कॉलम (अगर ज़रूरत पड़े, बढ़ाएँ)
+# ────────────────────────────────────────────────────────────────────
+MAX_EMAILS = 5
+MAX_PHONES = 5
 
 def get_company_name(url: str) -> str:
     domain = urlparse(url).netloc
@@ -42,14 +59,14 @@ def get_company_name(url: str) -> str:
     return base.capitalize()
 
 def create_selenium_driver() -> webdriver.Chrome:
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--log-level=3")
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--log-level=3")
     service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(10)
     driver.implicitly_wait(5)
     return driver
@@ -65,6 +82,7 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
         "error": ""
     }
 
+    # Step 1: HTTP status चेक
     try:
         resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code != 200:
@@ -74,6 +92,7 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
         result["error"] = "Error 500 (request failed)"
         return result
 
+    # Step 2: Selenium से पेज लोड + BeautifulSoup
     try:
         driver.get(url)
         page_html = driver.page_source
@@ -84,9 +103,11 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
     soup = BeautifulSoup(page_html, "html.parser")
     text = soup.get_text(separator="\n")
 
+    # Extract emails & phones
     emails = set(re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", text))
     phones = set(m.strip() for m in re.findall(PHONE_REGEX, text))
 
+    # Find “Contact” link (अगर मिले)
     contact_form_link = ""
     for a in soup.find_all("a", href=True):
         href_text = a.get_text().strip().lower()
@@ -102,7 +123,9 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
             contact_html = driver.page_source
             contact_soup = BeautifulSoup(contact_html, "html.parser")
             contact_text = contact_soup.get_text(separator="\n")
-            more_emails = set(re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", contact_text))
+            more_emails = set(
+                re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", contact_text)
+            )
             more_phones = set(m.strip() for m in re.findall(PHONE_REGEX, contact_text))
             emails |= more_emails
             phones |= more_phones
@@ -111,6 +134,7 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
 
     current_soup = contact_soup if contact_soup else soup
 
+    # Social links निकालें
     for a in current_soup.find_all("a", href=True):
         href_full = urljoin(url, a["href"])
         for name, domain in SOCIAL_DOMAINS.items():
@@ -124,27 +148,18 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
     return result
 
 def main():
-    driver = create_selenium_driver()
-    all_results = []
+    # CSV फ़ाइल तैयार करें और header एक बार लिख दें
+    csv_filename = "company_contacts_detailed.csv"
+    with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        header = ["Company", "URL", "Contact Form"]
+        header += [f"Email {i+1}" for i in range(MAX_EMAILS)]
+        header += [f"Phone {i+1}" for i in range(MAX_PHONES)]
+        header += list(SOCIAL_DOMAINS.keys())
+        header.append("Error")
+        writer.writerow(header)
 
-    max_emails = 0
-    max_phones = 0
-    temp_results = []
-
-    for url in urls:
-        data = extract_contact_info_with_selenium(url, driver)
-        temp_results.append(data)
-        max_emails = max(max_emails, len(data["emails"]))
-        max_phones = max(max_phones, len(data["phones"]))
-
-    driver.quit()
-
-    header = ["Company", "URL", "Contact Form"]
-    header += [f"Email {i+1}" for i in range(max_emails)]
-    header += [f"Phone {i+1}" for i in range(max_phones)]
-    header += list(SOCIAL_DOMAINS.keys())
-    header.append("Error")
-
+    # उसी हेडर को Google Sheet में भी भेजें
     header_payload = {"row": header, "isHeader": True}
     try:
         resp = requests.post(WEBHOOK_URL, json=header_payload, timeout=30)
@@ -153,25 +168,42 @@ def main():
         print("Error sending header:", ex)
         return
 
+    # अब Selenium ड्राइवर बनाएं, और लाइव हर URL पर स्क्रैप करें
     driver = create_selenium_driver()
-    for data in tqdm(temp_results, desc="Posting rows to sheet"):
-        row = [
-            data["company_name"],
-            data["url"],
-            data["contact_form"]
-        ]
-        for i in range(max_emails):
-            row.append(data["emails"][i] if i < len(data["emails"]) else "")
-        for i in range(max_phones):
-            row.append(data["phones"][i] if i < len(data["phones"]) else "")
-        for name in SOCIAL_DOMAINS:
-            row.append(data["social_links"][name])
-        row.append(data["error"])
+    for data in tqdm(urls, desc="Scraping and posting live"):
+        # एक-एक करके scrape करके result लें
+        result = extract_contact_info_with_selenium(data, driver)
 
+        # CSV में तुरंत append कर दें
+        row = [
+            result["company_name"],
+            result["url"],
+            result["contact_form"]
+        ]
+        # Emails (MAX_EMAILS तक)
+        for i in range(MAX_EMAILS):
+            row.append(result["emails"][i] if i < len(result["emails"]) else "")
+        # Phones (MAX_PHONES तक)
+        for i in range(MAX_PHONES):
+            row.append(result["phones"][i] if i < len(result["phones"]) else "")
+        # Social links (LinkedIn, Facebook, …)
+        for name in SOCIAL_DOMAINS:
+            row.append(result["social_links"][name])
+        # Error
+        row.append(result["error"])
+
+        # CSV में लिखें
+        with open(csv_filename, "a", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(row)
+
+        # Google Sheet में पोस्ट करें (isHeader = False by default)
         try:
-            requests.post(WEBHOOK_URL, json={"row": row}, timeout=30)
+            resp = requests.post(WEBHOOK_URL, json={"row": row}, timeout=30)
+            print(f"Posted row for {result['company_name']}: {resp.text}")
         except Exception as ex:
-            print(f"Error posting row for {data['url']}: {ex}")
+            print(f"Error posting row for {result['company_name']}: {ex}")
+
     driver.quit()
 
 if __name__ == "__main__":
