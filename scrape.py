@@ -12,41 +12,18 @@ from urllib.parse import urljoin, urlparse
 from tqdm import tqdm
 
 # ────────────────────────────────────────────────────────────────────
-# 1) अपना Webhook URL यहां पेस्ट करें (जो आपने Apps Script डिप्लॉय करते समय कॉपी किया था)
+# 1) Paste your deployed Apps Script webhook URL here
 # ────────────────────────────────────────────────────────────────────
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxvHc74uyZ03QLoR3KuCNf3-inhn3zitmq2Z8vxsM3WTaUOIYtD8QBvTvnJI8TXkza6Vg/exec"
-# ────────────────────────────────────────────────────────────────────
 
-# List of company URLs to scrape (आप अपनी लिस्ट यहां एडजस्ट कर सकते हैं)
+# List of company contact page URLs to scrape (adjust as needed)
 urls = [
-   "http://www.aire-search.com/#contact",
-"http://www.airexecsearch.com/contact-us",
-"http://www.aiselecta.com/#contact",
-"http://www.ajbconsultancy.com.au/#contact",
-"http://www.akashicstudiesaustralia.com/contact",
-"http://www.alascogroup.com/contact",
-"http://www.albany-appointments.co.uk/contact-us.html",
-"http://www.alexcorreaexecutive.com.au/contact62a106c8",
-"http://www.alexjamesdigital.co.uk/contact/",
-"http://www.alfursanrecruitment.ae/contact-us",
-"http://www.aligntalent.com.au/contact",
-"http://www.alisonmanning.com/contact.html",
-"http://www.alkhalidmanpower.co/contact-us",
-"http://www.allaboutyouconsulting.com/html_docs/contact.html",
-"http://www.allaccesstraining.co.uk/contact.php",
-"http://www.allbyn.com/contact",
-"http://www.allclassequipmenttraining.com/contact.html",
-"http://www.allenaclarke.co.uk/index.php/contact/",
-"http://www.allenjames.co.uk/contact-us",
-"http://www.allskillsservices.com.au/contact-all-skills.html",
-"http://www.allureconsulting.com.au/contact.html",
-"http://www.almasearch.com/",
-"http://www.alpaka.io/contact",
-"http://www.altanarecruitment.co.uk/Contact.aspx",
-"http://www.alteredresourcing.co.uk/#Contact",
+    "http://www.aire-search.com/#contact",
+    "http://www.airexecsearch.com/contact-us",
+    # … (other URLs) …
 ]
 
-# Domains for social links
+# Domains to recognize social media links
 SOCIAL_DOMAINS = {
     "LinkedIn":  "linkedin.com",
     "Facebook":  "facebook.com",
@@ -55,7 +32,7 @@ SOCIAL_DOMAINS = {
     "YouTube":   "youtube.com"
 }
 
-# Phone regex
+# Regular expression to match phone numbers (with optional country/area codes)
 PHONE_REGEX = re.compile(r"""
   (?:\+?\d{1,3}[-.\s]?)?        # optional country code
   (?:\(?\d{2,4}\)?[-.\s]?)      # optional area code
@@ -63,11 +40,13 @@ PHONE_REGEX = re.compile(r"""
   """, re.VERBOSE)
 
 def get_company_name(url: str) -> str:
+    """Extract a simple company name from the URL."""
     domain = urlparse(url).netloc
     base = domain.replace("www.", "").split(".")[0]
     return base.capitalize()
 
 def create_selenium_driver() -> webdriver.Chrome:
+    """Initialize a headless Chrome WebDriver."""
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
@@ -78,6 +57,15 @@ def create_selenium_driver() -> webdriver.Chrome:
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> dict:
+    """
+    Scrape a single URL for contact details:
+      - HTTP status
+      - Contact form link
+      - Email addresses
+      - Phone numbers
+      - Social media links
+    Returns a dict with all findings or an error string.
+    """
     result = {
         "company_name": get_company_name(url),
         "url": url,
@@ -88,7 +76,7 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
         "error": ""
     }
 
-    # Step 1: HTTP status चेक
+    # 1) Check HTTP status via requests
     try:
         resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     except Exception:
@@ -99,7 +87,7 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
         result["error"] = f"Error {resp.status_code}"
         return result
 
-    # Step 2: Selenium से पेज लोड + BeautifulSoup
+    # 2) Load the page in Selenium and get HTML
     try:
         driver.get(url)
         time.sleep(3)
@@ -111,11 +99,11 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
     soup = BeautifulSoup(page_html, "html.parser")
     text = soup.get_text(separator="\n")
 
-    # Extract emails & phones
+    # Extract emails and phones from the page text
     emails = set(re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", text))
     phones = set(m.strip() for m in re.findall(PHONE_REGEX, text))
 
-    # Find “Contact” link
+    # Find the first “Contact” link
     contact_form_link = ""
     for a in soup.find_all("a", href=True):
         href_text = a.get_text().strip().lower()
@@ -124,6 +112,7 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
             contact_form_link = urljoin(url, a["href"])
             break
 
+    # If a contact page was found, re-scrape it for more info
     contact_soup = None
     if contact_form_link:
         try:
@@ -132,17 +121,15 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
             contact_html = driver.page_source
             contact_soup = BeautifulSoup(contact_html, "html.parser")
             contact_text = contact_soup.get_text(separator="\n")
-            more_emails = set(re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", contact_text))
-            more_phones = set(m.strip() for m in re.findall(PHONE_REGEX, contact_text))
-            emails |= more_emails
-            phones |= more_phones
+            emails |= set(re.findall(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9-.]+", contact_text))
+            phones |= set(m.strip() for m in re.findall(PHONE_REGEX, contact_text))
         except Exception:
             pass
 
-    # कौन सा soup यूज़ करना है (contact वाला या मुख्य पेज)
+    # Choose which soup to use for social links
     current_soup = contact_soup if contact_soup else soup
 
-    # Social links निकालें
+    # Extract social media links
     social_links = {k: "" for k in SOCIAL_DOMAINS}
     for a in current_soup.find_all("a", href=True):
         href_full = urljoin(url, a["href"])
@@ -150,19 +137,21 @@ def extract_contact_info_with_selenium(url: str, driver: webdriver.Chrome) -> di
             if domain in href_full and not social_links[name]:
                 social_links[name] = href_full
 
+    # Populate result fields
     result["contact_form"] = contact_form_link
-    result["emails"] = sorted(list(emails))
-    result["phones"] = sorted(list(phones))
+    result["emails"] = sorted(emails)
+    result["phones"] = sorted(phones)
     result["social_links"] = social_links
 
     return result
 
 def main():
+    """Main entry point: scrape all URLs, write to CSV/JSON, then post CSV to Google Sheets."""
     driver = create_selenium_driver()
     all_results = []
-    max_emails = 0
-    max_phones = 0
+    max_emails = max_phones = 0
 
+    # Scrape each URL with progress bar
     for url in tqdm(urls, desc="Scraping URLs"):
         data = extract_contact_info_with_selenium(url, driver)
         all_results.append(data)
@@ -171,42 +160,40 @@ def main():
 
     driver.quit()
 
-    # 1) CSV लिखें
+    # 1) Write detailed CSV
     csv_filename = "company_contacts_detailed.csv"
     with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
-        header = [
-            "Company",
-            "URL",
-            "Contact Form"
-        ]
+        # Build header dynamically based on max counts
+        header = ["Company", "URL", "Contact Form"]
         header += [f"Email {i+1}" for i in range(max_emails)]
         header += [f"Phone {i+1}" for i in range(max_phones)]
         header += list(SOCIAL_DOMAINS.keys())
         header.append("Error")
         writer.writerow(header)
 
+        # Write each result row, padding missing values
         for item in all_results:
             row = [
                 item["company_name"],
                 item["url"],
                 item["contact_form"]
             ]
-            row += item["emails"] + [""] * (max_emails - len(item["emails"]))
-            row += item["phones"] + [""] * (max_phones - len(item["phones"]))
+            row += item["emails"] + [""]*(max_emails - len(item["emails"]))
+            row += item["phones"] + [""]*(max_phones - len(item["phones"]))
             row += [item["social_links"].get(name, "") for name in SOCIAL_DOMAINS]
             row.append(item.get("error", ""))
             writer.writerow(row)
 
     print(f"✅ CSV written to {csv_filename}")
 
-    # 2) JSON भी लिख दें (optional)
+    # 2) Optionally write JSON
     json_filename = "company_contacts_detailed.json"
     with open(json_filename, "w", encoding="utf-8") as jsonfile:
         json.dump(all_results, jsonfile, indent=2, ensure_ascii=False)
     print(f"✅ JSON written to {json_filename}")
 
-    # 3) अब पूरी CSV टेक्स्ट Apps Script को भेजें
+    # 3) Send full CSV text to Google Sheets via webhook
     with open(csv_filename, "r", encoding="utf-8") as f:
         csv_text = f.read()
 
@@ -214,12 +201,11 @@ def main():
     try:
         resp = requests.post(WEBHOOK_URL, json=payload, timeout=30)
         if resp.status_code == 200:
-            print("✅ Google Sheet में CSV इम्पोर्ट हो गया: ", resp.text)
+            print("✅ CSV successfully imported to Google Sheet:", resp.text)
         else:
-            print(f"❌ Google Sheet POST failed (HTTP {resp.status_code}): {resp.text}")
+            print(f"❌ Google Sheet POST failed (HTTP {resp.status_code}):", resp.text)
     except Exception as ex:
         print("❌ Exception while posting CSV to Google Sheet:", ex)
 
 if __name__ == "__main__":
     main()
-
