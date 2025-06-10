@@ -2,39 +2,39 @@
  *  Google Apps Script: CSV-to-Sheet Importer
  *  ==========================================
  *
- *  यह doPost(e) उस JSON को पार्स करता है जो Python स्क्रिप्ट भेजती है:
+ *  This doPost(e) function parses the JSON sent from your Python script:
  *    { "csv": "Company,URL,Email 1,...\nAcme,...\n..." }
- *  फिर Utilities.parseCsv से CSV टेक्स्ट को 2D ऐरे में बदलकर
- *  "Scraped Data" (या आपकी पसंद का नाम) शीट में लिख देता है।
+ *  Then it converts the CSV text into a 2D array via Utilities.parseCsv
+ *  and writes it in one go into the “Scraped Data” sheet (or whatever you name it).
  */
 
 function doPost(e) {
   try {
-    // 1) JSON पार्स करें (Python payload में आपको payload["csv"] भेजा है)
+    // 1) Parse JSON payload (your Python script should send payload["csv"])
     var requestData = JSON.parse(e.postData.contents);
     if (!requestData.csv) {
-      throw new Error("Request JSON में 'csv' फ़ील्ड नहीं मिला।");
+      throw new Error("Request JSON is missing the 'csv' field.");
     }
     var csvText = requestData.csv.toString();
 
-    // 2) CSV को 2D ऐरे में बदलें
+    // 2) Convert CSV text into a 2D array
     var allRows = Utilities.parseCsv(csvText);
 
-    // 3) Spreadsheet और target शीट खोलें/बनाएँ
+    // 3) Open (or create) the target sheet
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheetName = "Scraped Data"; // आप इसे “Csv to json” या जो भी नाम चाहते हों बदल सकते हैं
+    var sheetName = "Scraped Data"; // Change as you like
     var sheet = ss.getSheetByName(sheetName);
 
     if (sheet) {
-      // अगर शीट है, तो पुराना डेटा साफ कर दें
+      // If it exists, clear old data first
       sheet.clear();
     } else {
-      // अगर नहीं है, तो नई शीट बना लें
+      // Otherwise create it
       sheet = ss.insertSheet(sheetName);
     }
 
-    // 4) अब सब CSV रो एक ही बार में शीट में लिखें
-    //    allRows.length = कितनी रो हैं, allRows[0].length = कितने कॉलम
+    // 4) Write every CSV row into the sheet in one batch
+    //    allRows.length = number of rows, allRows[0].length = number of columns
     if (allRows.length > 0) {
       sheet
         .getRange(1, 1, allRows.length, allRows[0].length)
